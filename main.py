@@ -6,17 +6,16 @@ from flask import Flask
 from threading import Thread
 import logging
 
-# ---------- Configuration (change IDs if needed) ----------
-TICKET_CHANNEL_ID = 1439198296345149461   # channel where !hi posts the request embed
-RULES_CHANNEL_ID = 1439259599420264459    # rules channel mention inside the embed
-ROLE_IDS_CAN_CLAIM = [1439374429904965832, 1439971194228179076]  # roles allowed to claim
-GUILD_ID = None  # optional: set guild id if you want to restrict some actions (not required)
-# --------------------------------------------------------
+# ---------- Configuration ----------
+TICKET_CHANNEL_ID = 1439198296345149461   # channel where !hi posts ticket embed
+RULES_CHANNEL_ID = 1439259599420264459    # rules channel
+ROLE_IDS_CAN_CLAIM = [1439374429904965832, 1439971194228179076]  # allowed roles
+# -----------------------------------
 
-# Setup logging
+# ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
 
-# Keep-alive (Railway)
+# ---------- Keepalive (Railway) ----------
 app = Flask("keepalive")
 
 @app.route("/")
@@ -30,22 +29,20 @@ def keep_alive():
     t = Thread(target=run_keepalive, daemon=True)
     t.start()
 
-# Intents - required for prefix message commands
+# ---------- Bot ----------
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
 intents.members = True
-intents.messages = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------- Views & Buttons ----------
-
+# ---------- Ticket Request Button ----------
 class RequestTicketView(View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(Button(label="Request Ticket", style=discord.ButtonStyle.primary, custom_id="request_ticket"))
 
+# ---------- Claim Button ----------
 class ClaimTicketView(View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -53,7 +50,6 @@ class ClaimTicketView(View):
 
     @discord.ui.button(label="Claim Ticket", style=discord.ButtonStyle.success, custom_id="claim_ticket")
     async def claim_button(self, interaction: discord.Interaction, button: Button):
-        # Check roles
         allowed = any(role.id in ROLE_IDS_CAN_CLAIM for role in interaction.user.roles)
         if not allowed:
             await interaction.response.send_message("You can't claim this ticket.", ephemeral=True)
@@ -62,57 +58,47 @@ class ClaimTicketView(View):
         ticket_channel = interaction.channel
         guild = interaction.guild
         if guild is None:
-            await interaction.response.send_message("This command must be used in a guild channel.", ephemeral=True)
+            await interaction.response.send_message("This must be used in a server.", ephemeral=True)
             return
 
-        # Remove Claim button from message (clear view items)
+        # Remove Claim button
         self.clear_items()
         try:
             await interaction.message.edit(view=self)
         except Exception:
             pass
 
-        # Adjust channel permissions:
-        # - Default: no view
-        # - Ticket owner: view + send
-        # - Claiming middleman (member): view + send
-        # - (Optional) Other middleman roles: keep view True but send False (so they can see but not talk)
-        overwrites = ticket_channel.overwrites_for(guild.default_role)
-        overwrites.view_channel = False
-        await ticket_channel.set_permissions(guild.default_role, overwrite=overwrites)
-
-        # Find the ticket owner from channel name or from first message - we stored it in topic below
+        # Get ticket owner from topic
         ticket_owner = None
-        if ticket_channel.topic:
-            # our topic format: "Ticket for: <user_id>"
-            if ticket_channel.topic.startswith("Ticket for:"):
-                try:
-                    uid = int(ticket_channel.topic.split(":")[1].strip())
-                    ticket_owner = guild.get_member(uid) or await guild.fetch_member(uid)
-                except Exception:
-                    ticket_owner = None
+        if ticket_channel.topic and ticket_channel.topic.startswith("Ticket for:"):
+            try:
+                uid = int(ticket_channel.topic.split(":")[1].strip())
+                ticket_owner = guild.get_member(uid) or await guild.fetch_member(uid)
+            except:
+                ticket_owner = None
 
-        # Ensure claiming member has send permissions
-        await ticket_channel.set_permissions(interaction.user, view=True, send_messages=True)
-
-        # Ensure ticket owner can send & view
+        # Set permissions
+        overwrites = ticket_channel.overwrites
+        # default role: can't view
+        await ticket_channel.set_permissions(guild.default_role, view_channel=False)
+        # ticket owner: view + send
         if ticket_owner:
             await ticket_channel.set_permissions(ticket_owner, view=True, send_messages=True)
-
-        # For all roles in ROLE_IDS_CAN_CLAIM, set view=True but send=False (so only the claiming user can send)
+        # claiming middleman: view + send
+        await ticket_channel.set_permissions(interaction.user, view=True, send_messages=True)
+        # other middleman roles: view True, send False
         for rid in ROLE_IDS_CAN_CLAIM:
             role = guild.get_role(rid)
             if role:
                 await ticket_channel.set_permissions(role, view=True, send_messages=False)
 
-        # Notify in channel
+        # Notify ticket
         await ticket_channel.send(f"{interaction.user.mention} will be your middleman.")
 
-        # Ephemeral confirm to the claimer
+        # Ephemeral confirmation
         await interaction.response.send_message("You claimed this ticket.", ephemeral=True)
 
 # ---------- Bot Events & Commands ----------
-
 @bot.event
 async def on_ready():
     logging.info(f"Logged in as {bot.user} (id: {bot.user.id})")
@@ -121,15 +107,9 @@ async def on_ready():
 @bot.command()
 @commands.guild_only()
 async def hi(ctx: commands.Context):
-    """
-    Sends the ticket request embed in the configured TICKET_CHANNEL_ID.
-    Use: !hi
-    """
     guild = ctx.guild
-    # try to fetch the configured channel
     dest = guild.get_channel(TICKET_CHANNEL_ID)
     if dest is None:
-        # maybe the channel is in another guild; attempt global fetch
         try:
             dest = await bot.fetch_channel(TICKET_CHANNEL_ID)
         except Exception:
@@ -139,9 +119,8 @@ async def hi(ctx: commands.Context):
     embed = discord.Embed(
         title="Ticket system",
         description=f"**Click here to request a middleman**\n**For information about Middleman rules, Please check here <#{RULES_CHANNEL_ID}>**",
-        color=discord.Color.white()
+        color=discord.Color.blurple()  # FIXED color
     )
-
     view = RequestTicketView()
     try:
         await dest.send(embed=embed, view=view)
@@ -153,7 +132,6 @@ async def hi(ctx: commands.Context):
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
-    # handle the "request_ticket" button
     if interaction.type != discord.InteractionType.component:
         return
 
@@ -161,25 +139,21 @@ async def on_interaction(interaction: discord.Interaction):
     if custom_id == "request_ticket":
         guild = interaction.guild
         if guild is None:
-            await interaction.response.send_message("This must be used in a guild.", ephemeral=True)
+            await interaction.response.send_message("This must be used in a server.", ephemeral=True)
             return
 
         user = interaction.user
-
-        # Create ticket channel name and overwrites
         safe_name = f"ticket-{user.name}".replace(" ", "-")[:90]
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
         }
 
-        # Give middleman roles view permission initially (they should be able to see the ticket so they can claim)
         for rid in ROLE_IDS_CAN_CLAIM:
             role = guild.get_role(rid)
             if role:
                 overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=False, read_message_history=True)
 
-        # Create the channel under the same category as the interaction channel if possible
         category = interaction.channel.category if interaction.channel else None
         try:
             ticket_channel = await guild.create_text_channel(
@@ -188,27 +162,21 @@ async def on_interaction(interaction: discord.Interaction):
                 category=category,
                 topic=f"Ticket for: {user.id}"
             )
-        except discord.Forbidden:
-            await interaction.response.send_message("Bot missing permissions to create channels.", ephemeral=True)
-            return
         except Exception as e:
-            await interaction.response.send_message(f"Failed to create ticket channel: {e}", ephemeral=True)
+            await interaction.response.send_message(f"Failed to create ticket: {e}", ephemeral=True)
             return
 
-        # Send the ticket embed and the Claim button inside the ticket channel
         embed = discord.Embed(
             title="Ticket system",
             description="Please wait for a Middleman to claim the ticket",
-            color=discord.Color.white()
+            color=discord.Color.blurple()
         )
         view = ClaimTicketView()
         try:
             await ticket_channel.send(f"{user.mention}", embed=embed, view=view)
-        except Exception:
-            # fallback - send without view if that fails
+        except:
             await ticket_channel.send(f"{user.mention}\nPlease wait for a Middleman to claim the ticket")
 
-        # Respond to the interaction with ephemeral message linking the ticket
         await interaction.response.send_message(f"Your ticket has been created: {ticket_channel.mention}", ephemeral=True)
 
 # ---------- Run ----------
